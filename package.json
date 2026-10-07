@@ -1,0 +1,24 @@
+{
+  "name": "verify-then-checkout",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Secured AI shopping agent in 5 minutes — GoBuy GPV-1 pre-purchase verification gate",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "ai": "^5.0.0",
+    "next": "^15.5.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "5.8.2"
+  }
+}
