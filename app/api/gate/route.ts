@@ -14,6 +14,6 @@ export async function POST(req: NextRequest) {
   }
   const result = await checkProductTrust(input);
   // GPV-1 R8: record the decision (verdict + spec version) before returning.
-  console.log(JSON.stringify({ spec: "gpv-1", specVersion: "1.0", ...result, at: new Date().toISOString() }));
+  console.log(JSON.stringify({ spec: "gpv-1", ...result, at: new Date().toISOString() }));
   return NextResponse.json(result);
 }

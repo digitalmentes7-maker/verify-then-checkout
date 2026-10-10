@@ -13,11 +13,43 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const GOBUY_MCP = "https://mcp.gobuy.ai/mcp";
 
+// GPV-1 spec pin. sha256 of the canonical ruleset at docs.gobuy.ai/standard/v1.json.
+// If the upstream hash drifts, verifyGateSpec() warns — re-pin deliberately, never silently.
+export const GATE_SPEC = {
+  spec: "gpv-1",
+  version: "1.0",
+  canonical: "https://docs.gobuy.ai/standard/v1.json",
+  sha256: "c00f175f40a08ec011ecb564724e67090ea99131543704b8f3fedca0d7695606",
+} as const;
+
+export async function verifyGateSpec(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const res = await fetch(GATE_SPEC.canonical);
+    if (!res.ok) return { ok: false, detail: `canonical spec HTTP ${res.status}` };
+    const body = await res.text();
+    const j = JSON.parse(body);
+    if (j.spec !== GATE_SPEC.spec || String(j.version) !== GATE_SPEC.version)
+      return { ok: false, detail: `spec identity drifted: got ${j.spec} v${j.version}, pinned ${GATE_SPEC.spec} v${GATE_SPEC.version}` };
+    // Hash the exact published bytes.
+    const sha = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+    const hex = [...new Uint8Array(sha)].map(b => b.toString(16).padStart(2, "0")).join("");
+    if (hex !== GATE_SPEC.sha256) return { ok: false, detail: `ruleset hash drifted: upstream ${hex} != pinned ${GATE_SPEC.sha256} — thresholds may be stale, re-pin deliberately` };
+    return { ok: true, detail: `GPV-1 v${GATE_SPEC.version} pinned (${hex.slice(0, 12)}…)` };
+  } catch (e) {
+    return { ok: false, detail: `spec check unreachable: ${(e as Error).message}` };
+  }
+}
+
 export type GateResult = {
   verdict: "PASS" | "FLAG" | "BLOCK" | "ERROR";
   summary: string;
+  specVersion: string;
   raw?: unknown;
 };
+
+export function gateSpecVersion(): string {
+  return `${GATE_SPEC.spec} v${GATE_SPEC.version} (sha256:${GATE_SPEC.sha256.slice(0, 12)}…)`;
+}
 
 export async function checkProductTrust(input: { url?: string; asin?: string; query?: string }): Promise<GateResult> {
   const client = new Client({ name: "verify-then-checkout", version: "1.0.0" });
@@ -47,7 +79,7 @@ export async function checkProductTrust(input: { url?: string; asin?: string; qu
         if (domain) storeDomain = domain[1];
         else {
           await client.close();
-          return { verdict: "ERROR", summary: "Give me a product URL or ASIN — the gate evaluates a specific listing, not a category (GPV-1 R1)." };
+          return { verdict: "ERROR", specVersion: gateSpecVersion(), summary: "Give me a product URL or ASIN — the gate evaluates a specific listing, not a category (GPV-1 R1)." };
         }
       }
     }
@@ -64,7 +96,7 @@ export async function checkProductTrust(input: { url?: string; asin?: string; qu
     await client.close();
     return mapProduct(text);
   } catch (e) {
-    return { verdict: "ERROR", summary: `Gate unreachable: ${(e as Error).message}` };
+    return { verdict: "ERROR", specVersion: gateSpecVersion(), summary: `Gate unreachable: ${(e as Error).message}` };
   }
 }
 
@@ -73,34 +105,34 @@ function textOf(res: unknown): string {
   return (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
 }
 
-function mapProduct(text: string): GateResult {
+export function mapProduct(text: string): GateResult {
   let j: any = null;
   try { j = JSON.parse(text); } catch { /* not JSON */ }
   if (j) {
     if (j.state === "not_indexed" || j.verdict === "unverified" || j.evidence_score == null) {
-      return { verdict: "BLOCK", summary: `Not in the evidence corpus (state: ${j.state ?? "?"}). GPV-1 R1 fails without verified evidence — checkout refused.`, raw: text };
+      return { verdict: "BLOCK", specVersion: gateSpecVersion(), summary: `Not in the evidence corpus (state: ${j.state ?? "?"}). GPV-1 R1 fails without verified evidence — checkout refused.`, raw: text };
     }
     return scoreToVerdict(Number(j.evidence_score), "Evidence Score");
   }
   const m = text.match(/"?(?:evidence_?score|smart_?score|score)"?\D{0,8}(\d{1,3})/i);
   if (m) return scoreToVerdict(parseInt(m[1], 10), "Evidence Score");
-  return { verdict: "ERROR", summary: "Could not parse the gate response.", raw: text };
+  return { verdict: "ERROR", specVersion: gateSpecVersion(), summary: "Could not parse the gate response.", raw: text };
 }
 
-function mapStore(text: string): GateResult {
+export function mapStore(text: string): GateResult {
   let j: any = null;
   try { j = JSON.parse(text); } catch { /* not JSON */ }
   const m100 = text.match(/(\d{1,3})\s*\/\s*100/);
   const score = j?.score ?? j?.trust_score ?? (m100 ? parseInt(m100[1], 10) : NaN);
   const tier = j?.tier ?? "";
-  if (tier === "D") return { verdict: "BLOCK", summary: `Store tier D (score ${score}). GPV-1 R6 fails — checkout refused.`, raw: text };
+  if (tier === "D") return { verdict: "BLOCK", specVersion: gateSpecVersion(), summary: `Store tier D (score ${score}). GPV-1 R6 fails — checkout refused.`, raw: text };
   if (!isNaN(score)) return scoreToVerdict(score, "Store Score");
-  return { verdict: "ERROR", summary: "Could not parse the store score.", raw: text };
+  return { verdict: "ERROR", specVersion: gateSpecVersion(), summary: "Could not parse the store score.", raw: text };
 }
 
 // GPV-1 default thresholds (R3): floor 55, hard block below 35.
-function scoreToVerdict(score: number, label: string): GateResult {
-  if (score >= 55) return { verdict: "PASS", summary: `GoBuy ${label} ${score}/100 — GPV-1 R3 satisfied (floor 55).`, };
-  if (score >= 35) return { verdict: "FLAG", summary: `${label} ${score}/100 is between 35 and 54 — GPV-1 requires the principal's explicit confirmation before checkout.` };
-  return { verdict: "BLOCK", summary: `${label} ${score}/100 is below the GPV-1 hard floor (35). Checkout refused.` };
+export function scoreToVerdict(score: number, label: string): GateResult {
+  if (score >= 55) return { verdict: "PASS", specVersion: gateSpecVersion(), summary: `GoBuy ${label} ${score}/100 — GPV-1 R3 satisfied (floor 55).`, };
+  if (score >= 35) return { verdict: "FLAG", specVersion: gateSpecVersion(), summary: `${label} ${score}/100 is between 35 and 54 — GPV-1 requires the principal's explicit confirmation before checkout.` };
+  return { verdict: "BLOCK", specVersion: gateSpecVersion(), summary: `${label} ${score}/100 is below the GPV-1 hard floor (35). Checkout refused.` };
 }
